@@ -1,7 +1,7 @@
 # Spec: `log_interaction()`
 
 **File:** `auditor.py`
-**Status:** Spec incomplete — fill in all blank fields before implementing
+**Status:** Spec complete
 
 ---
 
@@ -27,15 +27,9 @@ Record every interaction — question, safety tier, and response preview — to 
 
 ## Design Decisions
 
-*Complete the fields below before writing any code.*
-
 ---
 
 ### Log entry fields
-
-*The four required fields are already in the table below. Add at least two more that you think a developer reviewing this log would actually need.*
-
-*Think about what you'd want to see if you discovered a cluster of 200 logged questions where the classifier was consistently wrong. What's missing from just the four required fields that would help you diagnose it?*
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -43,53 +37,86 @@ Record every interaction — question, safety tier, and response preview — to 
 | `"tier"` | `str` | Safety tier assigned to this question |
 | `"question"` | `str` | The user's question, truncated to 300 characters |
 | `"response_preview"` | `str` | First 200 characters of the generated response |
-| `[your field]` | `[type]` | [description] |
-| `[your field]` | `[type]` | [description] |
+| `"question_length"` | `int` | Full character length of the original question before truncation |
+| `"response_length"` | `int` | Full character length of the full response before truncation |
+
+**Why these two extra fields:** if I find a cluster of questions where the classifier is
+consistently wrong, the first thing I want to know is whether truncation is hiding the
+signal — a 1,200-character question truncated to 300 may have buried the detail that
+should have flipped the tier. Logging the full `question_length` and `response_length`
+lets me (a) detect that the stored preview is incomplete, and (b) spot patterns like
+"every misclassified question was unusually long" or "refuse responses are suspiciously
+long, suggesting the model is leaking instructions." These are cheap integers that make
+the truncated text trustworthy as a diagnostic signal.
 
 ---
 
 ### Why these truncation limits?
 
-*The required fields truncate the question to 300 characters and the response to 200. Write down the reasoning for each — what would you lose by truncating more aggressively, and what's the risk of logging the full text at production scale?*
-
 ```
-[your answer here]
+Question → 300 chars: real repair questions are almost always one or two sentences, so
+300 chars captures the full question in nearly every case while bounding the row size.
+Truncating more aggressively (say 100) would start cutting off the qualifying clause
+that often determines the tier — "...the outlet that stopped working" vs "...a new
+outlet in the garage" — destroying exactly the detail an auditor needs.
+
+Response → 200 chars: the preview only needs to let a reviewer recognize WHICH response
+was given and spot obvious problems (e.g. a refuse response that starts listing steps).
+200 chars is enough to see the opening and tell refuse/caution/safe responses apart
+without storing the whole answer.
+
+Risk of logging full text at production scale: storage and cost grow unbounded, and —
+more importantly — full logs of user questions and answers are a privacy and compliance
+liability (PII, retention rules, breach exposure). Storing previews plus full lengths
+keeps logs small and lower-risk while preserving the diagnostic signal; the full text
+can be regenerated or sampled separately if a specific investigation needs it.
 ```
 
 ---
 
 ### Directory creation
 
-*What happens if `logs/` doesn't exist when the function runs for the first time? How will you handle that — and why is this worth thinking about at all?*
-
 ```
-[your answer here]
+If logs/ doesn't exist, os.makedirs(parent, exist_ok=True) before opening the file in
+append mode. This matters because the very first interaction on a fresh checkout (or in
+a container where logs/ wasn't committed) would otherwise crash with FileNotFoundError
+on the open() call — and a logging failure should never take down the request path.
+Creating the directory on demand makes the logger self-healing and safe to call
+unconditionally from the pipeline. Logging is also wrapped so that any I/O error is
+caught and printed rather than propagated, because an audit-log failure must not break
+the user-facing response.
 ```
 
 ---
 
 ### Console output
 
-*Write an example of what you want the one-line terminal summary to look like after a question is logged. Be specific about format.*
-
 ```
-[your example output here]
+[LOGGED] tier=caution | "How do I replace a bathroom faucet?" → 612 chars
+
+Format: "[LOGGED] tier=<tier> | \"<question, truncated to ~60 chars>\" → <full response length> chars".
+The full response length (not the 200-char preview length) is shown so the terminal
+gives an honest sense of how much was generated.
 ```
 
 ---
 
 ## Implementation Notes
 
-*Fill this in after implementing.*
-
 **The actual log file content after 3 test queries (paste the three JSON lines):**
 
 ```
-[your answer here]
+{"timestamp": "2026-06-22T05:01:50.418242Z", "tier": "caution", "question": "How do I unclog a slow bathroom drain?", "response_preview": "Before attempting to unclog your slow bathroom drain, the single most important safety step is to turn off the water supply to the bathroom and ensure the area is clear of water. This will prevent any", "question_length": 38, "response_length": 2125}
+{"timestamp": "2026-06-22T05:01:53.404871Z", "tier": "caution", "question": "How do I replace a bathroom faucet?", "response_preview": "**Shut off the water supply to the faucet by locating the shut-off valves under the sink and turning them clockwise. Open the faucet to relieve pressure in the lines.** This is the most critical safet", "question_length": 35, "response_length": 2983}
+{"timestamp": "2026-06-22T05:01:54.784692Z", "tier": "refuse", "question": "I just want to move a light switch six inches over, no big deal right?", "response_preview": "I completely understand that you're trying to make a simple adjustment, but I have to advise you that moving a light switch, even just six inches, is not a safe DIY repair. The reason is that it invol", "question_length": 70, "response_length": 1093}
 ```
 
 **One field you'd add to the log if this were a real production system handling 10,000 questions per day:**
 
 ```
-[your answer here]
+I'd add a request_id (a UUID per interaction). If you're handling 10k questions a day and
+someone reports a bad answer, a timestamp isn't enough to find the exact one — there'd be
+collisions and concurrent requests. A unique ID lets you pull up that specific interaction
+and trace it. I'd probably also log the model name and prompt version so if behavior changes
+after a deploy you can tell which version caused it.
 ```
